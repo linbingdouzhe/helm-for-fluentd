@@ -1,0 +1,398 @@
+# Default values for fluentd.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+useStatefulSet: true
+replicaCount: 5
+image:
+  repository: nexus.wisers.com.cn/fluentd-rewrite-kube-filter
+  tag: v2.4.1
+  pullPolicy: IfNotPresent
+  # pullSecrets:
+  #   - secret1
+  #   - secret2
+
+output:
+  host: opendistro.wisersops.internal
+  port: 9200
+  scheme: https
+  sslVersion: TLSv1_2
+  buffer_chunk_limit: 2M
+  buffer_queue_limit: 8
+
+env: {}
+
+tolerations:
+- key: "role"
+  operator: "Equal"
+  value: "fluent"
+  effect: "NoExecute"
+
+
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: role
+          operator: In
+          values:
+          - fluent
+# Extra Environment Values - allows yaml definitions
+extraEnvVars:
+#  - name: VALUE_FROM_SECRET
+#    valueFrom:
+#      secretKeyRef:
+#        name: secret_name
+#        key: secret_key
+
+service:
+  annotations: {}
+  type: ClusterIP
+  # type: NodePort
+  # nodePort:
+  # Used to create Service records
+  ports:
+    - name: "monitor-agent"
+      protocol: TCP
+      containerPort: 24220
+    - name: "forward"
+      protocol: TCP
+      containerPort: 24224
+
+metrics:
+  enabled: false
+  service:
+    port: 24231
+  serviceMonitor:
+    enabled: false
+    additionalLabels: {}
+    # namespace: monitoring
+    # interval: 30s
+    # scrapeTimeout: 10s
+
+annotations: {}
+#  prometheus.io/scrape: "true"
+#  prometheus.io/port: "24231"
+
+ingress:
+  enabled: false
+  annotations:
+    kubernetes.io/ingress.class: nginx
+#    kubernetes.io/tls-acme: "true"
+#    # Depending on which version of ingress controller you may need to configure properly - https://kubernetes.github.io/ingress-nginx/examples/rewrite/#rewrite-target
+#    nginx.ingress.kubernetes.io/rewrite-target: /
+  labels: []
+  # If doing TCP or UDP ingress rule don't forget to update your Ingress Controller to accept TCP connections - https://kubernetes.github.io/ingress-nginx/user-guide/exposing-tcp-udp-services/
+  hosts:
+     - name: "fluent.wwsihb.wisers.net.cn"
+       protocol: TCP
+       servicePort: 9880
+       path: /
+  tls: {}
+  # Secrets must be manually created in the namespace.
+#    - secretName: http-input-tls
+#      hosts:
+#        - http-input.local
+
+configMaps:
+  general.conf: |
+    # Prevent fluentd from handling records containing its own logs. Otherwise
+    # it can lead to an infinite loop, when error in sending one message generates
+    # another message which also fails to be sent and so on.
+    <match fluentd.**>
+      @type null
+    </match>
+    # Used for health checking
+    <source>
+      @type http
+      port 9880
+      bind 0.0.0.0
+    </source>
+
+    # Emits internal metrics to every minute, and also exposes them on port
+    # 24220. Useful for determining if an output plugin is retryring/erroring,
+    # or determining the buffer queue length.
+    <source>
+      @type monitor_agent
+      bind 0.0.0.0
+      port 24220
+      tag fluentd.monitor.metrics
+    </source>
+  system.conf: |-
+    <system>
+      root_dir /tmp/fluentd-buffers/
+    </system>
+  forward-input.conf: |
+    <source>
+      @type forward
+      port 24224
+      bind 0.0.0.0
+    </source>
+    <filter kube.var.log.containers.coredns**>
+      @type parser
+      @log_level info
+      format json
+      key_name log
+      reserve_data true
+      <parse>
+        @type json
+        time_key time
+        #utc true
+        time_format %Y-%m-%dT%H:%M:%S.%9NZ
+        timezone "+08:00"
+      </parse>
+    </filter>
+  output.conf: |
+    <match kube.var.log.containers.coredns**>
+      @id coredns
+      @type elasticsearch
+      include_tag_key true
+      # Replace with the host/port to your Elasticsearch cluster.
+      host "opendistro.wisersops.internal"
+      port "9200"
+      scheme "https"
+      ssl_version "TLSv1_2"
+      ssl on
+      ssl_verify false
+      logstash_format true
+      logstash_prefix ihb-aws-coredns
+      reconnect_on_error true
+      reload_on_failure true
+      reload_connections false
+      <buffer>
+        @type file
+        path /var/log/fluentd-buffers/coredns/kubernetes.system.buffer
+        flush_mode interval
+        retry_type exponential_backoff
+        flush_thread_count 2
+        flush_interval 5s
+        retry_forever
+        retry_max_interval 30
+      </buffer>
+    </match>
+    <match kube.var.lib.rancher.rke.log.kubelet**>
+      @id kubelet
+      @type elasticsearch
+      include_tag_key true
+      # Replace with the host/port to your Elasticsearch cluster.
+      host "opendistro.wisersops.internal"
+      port "9200"
+      scheme "https"
+      ssl_version "TLSv1_2"
+      ssl on
+      ssl_verify false
+      logstash_format true
+      logstash_prefix ihb-aws-kubelet
+      reconnect_on_error true
+      reload_on_failure true
+      reload_connections false
+      <buffer>
+        @type file
+        path /var/log/fluentd-buffers/kube-kubelet/kubernetes.system.buffer
+        flush_mode interval
+        retry_type exponential_backoff
+        flush_thread_count 2
+        flush_interval 5s
+        retry_forever
+        retry_max_interval 30
+      </buffer>
+    </match>
+
+    <match kube.var.lib.rancher.rke.log.kube-proxy**>
+      @id kube-proxy
+      @type elasticsearch
+      include_tag_key true
+      # Replace with the host/port to your Elasticsearch cluster.
+      host "opendistro.wisersops.internal"
+      port "9200"
+      scheme "https"
+      ssl_version "TLSv1_2"
+      ssl on
+      ssl_verify false
+      logstash_format true
+      logstash_prefix ihb-aws-kube-proxy
+      reconnect_on_error true
+      reload_on_failure true
+      reload_connections false
+      <buffer>
+        @type file
+        path /var/log/fluentd-buffers/kube-proxy/kubernetes.system.buffer
+        flush_mode interval
+        retry_type exponential_backoff
+        flush_thread_count 2
+        flush_interval 5s
+        retry_forever
+        retry_max_interval 30
+      </buffer>
+    </match>
+    <match kube.var.lib.rancher.rke.log.kube-apiserver**>
+      @id kube-apiserver
+      @type elasticsearch
+      include_tag_key true
+      # Replace with the host/port to your Elasticsearch cluster.
+      host "opendistro.wisersops.internal"
+      port "9200"
+      scheme "https"
+      ssl_version "TLSv1_2"
+      ssl on
+      ssl_verify false
+      logstash_format true
+      logstash_prefix ihb-aws-kube-apiserver
+      reconnect_on_error true
+      reload_on_failure true
+      reload_connections false
+      <buffer>
+        @type file
+        path /var/log/fluentd-buffers/kube-apiserver/kubernetes.system.buffer
+        flush_mode interval
+        retry_type exponential_backoff
+        flush_thread_count 2
+        flush_interval 5s
+        retry_forever
+        retry_max_interval 30
+      </buffer>
+    </match>
+    <match kube.var.lib.rancher.rke.log.kube-scheduler**>
+      @id kube-scheduler
+      @type elasticsearch
+      include_tag_key true
+      # Replace with the host/port to your Elasticsearch cluster.
+      host "opendistro.wisersops.internal"
+      port "9200"
+      scheme "https"
+      ssl_version "TLSv1_2"
+      ssl on
+      ssl_verify false
+      logstash_format true
+      logstash_prefix ihb-aws-kube-scheduler
+      reconnect_on_error true
+      reload_on_failure true
+      reload_connections false
+      <buffer>
+        @type file
+        path /var/log/fluentd-buffers/kube-scheduler/kubernetes.system.buffer
+        flush_mode interval
+        retry_type exponential_backoff
+        flush_thread_count 2
+        flush_interval 5s
+        retry_forever
+        retry_max_interval 30
+      </buffer>
+    </match>
+    <match kube.var.lib.rancher.rke.log.kube-controller-manager**>
+      @id kube-controller-mgmr
+      @type elasticsearch
+      include_tag_key true
+      # Replace with the host/port to your Elasticsearch cluster.
+      host "opendistro.wisersops.internal"
+      port "9200"
+      scheme "https"
+      ssl_version "TLSv1_2"
+      ssl on
+      ssl_verify false
+      logstash_format true
+      logstash_prefix ihb-aws-kube-controller-manager
+      reconnect_on_error true
+      reload_on_failure true
+      reload_connections false
+      <buffer>
+        @type file
+        path /var/log/fluentd-buffers/kube-controller-manager/kubernetes.system.buffer
+        flush_mode interval
+        retry_type exponential_backoff
+        flush_thread_count 2
+        flush_interval 5s
+        retry_forever
+        retry_max_interval 30
+      </buffer>
+    </match>
+    <match kube.var.lib.rancher.rke.log.etcd**>
+      @id kube-etcd
+      @type elasticsearch
+      include_tag_key true
+      # Replace with the host/port to your Elasticsearch cluster.
+      host "opendistro.wisersops.internal"
+      port "9200"
+      scheme "https"
+      ssl_version "TLSv1_2"
+      ssl on
+      ssl_verify false
+      logstash_format true
+      logstash_prefix ihb-aws-etcd
+      reconnect_on_error true
+      reload_on_failure true
+      reload_connections false
+      <buffer>
+        @type file
+        path /var/log/fluentd-buffers/kube-etcd/kubernetes.system.buffer
+        flush_mode interval
+        retry_type exponential_backoff
+        flush_thread_count 2
+        flush_interval 5s
+        retry_forever
+        retry_max_interval 30
+      </buffer>
+    </match>
+resources: 
+  # We usually recommend not to specify default resources and to leave this as a conscious
+  # choice for the user. This also increases chances charts run on environments with little
+  # resources, such as Minikube. If you do want to specify resources, uncomment the following
+  # lines, adjust them as necessary, and remove the curly braces after 'resources:'.
+  limits:
+   cpu: 1000m
+   memory: 3000Mi
+  requests:
+   cpu: 1000m
+   memory: 3000Mi
+
+rbac:
+  # Specifies whether RBAC resources should be created
+  create: true
+
+serviceAccount:
+  # Specifies whether a ServiceAccount should be created
+  create: true
+  # The name of the ServiceAccount to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name:
+
+## Persist data to a persistent volume
+persistence:
+  enabled: true
+
+  ## If defined, storageClassName: <storageClass>
+  ## If set to "-", storageClassName: "", which disables dynamic provisioning
+  ## If undefined (the default) or set to null, no storageClassName spec is
+  ##   set, choosing the default provisioner.  (gp2 on AWS, standard on
+  ##   GKE, AWS & OpenStack)
+  ##
+  storageClass: "gp2"
+  # annotations: {}
+  accessMode: ReadWriteOnce
+  size: 10Gi
+
+nodeSelector: {}
+
+
+# Enable autoscaling using HorizontalPodAutoscaler
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 60
+
+# Consider to set higher value when using in conjuction with autoscaling
+# Full description about this field: https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.15/#pod-v1-core
+terminationGracePeriodSeconds: 30
