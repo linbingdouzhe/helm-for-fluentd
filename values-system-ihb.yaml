@@ -4,7 +4,7 @@
 useStatefulSet: true
 replicaCount: 5
 image:
-  repository: nexus.wisers.com.cn/fluentd-rewrite-kube-filter
+  repository: nexus.cn/fluentd-rewrite-kube-filter
   tag: v2.4.1
   pullPolicy: IfNotPresent
   # pullSecrets:
